@@ -1,0 +1,111 @@
+
+#py -m pip install pandas numpy scikit-learn tensorflow
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.utils import to_categorical
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+
+# Wczytywanie danych z pliku CSV
+data = pd.read_csv("goodreads_data.csv")
+print("Dane wczytane pomyślnie. Kolumny w danych:", list(data.columns))
+
+# Wektoryzacja tekstu opisów książek przy użyciu TF-IDF
+vectorizer = TfidfVectorizer(max_features=1000)  # Maksymalnie 1000 cech tekstowych
+X_description = vectorizer.fit_transform(data['Description'].fillna('')).toarray()  # Zamiana danych na macierz numeryczną
+
+# Kodowanie autorów książek za pomocą OneHotEncoder
+author_encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
+author_encoded = author_encoder.fit_transform(data[['Author']])
+
+# Łączenie wektorów opisu i zakodowanych autorów w jeden zbiór danych wejściowych
+X = np.concatenate([X_description, author_encoded], axis=1)
+
+# Skalowanie danych wejściowych do wartości standardowych
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Przygotowanie etykiet dla książek i ich kodowanie
+data['Book'] = data['Book'].fillna('Unknown')  # Wypełnienie brakujących wartości tytułów
+book_titles = data['Book'].unique()  # Unikalne tytuły książek
+book_to_id = {title: idx for idx, title in enumerate(book_titles)}  # Mapa tytułów na identyfikatory
+id_to_book = {idx: title for title, idx in book_to_id.items()}  # Odwrotna mapa identyfikatorów na tytuły
+y_book_encoded = np.array([book_to_id[title] for title in data['Book']])  # Konwersja tytułów na identyfikatory
+y_book = to_categorical(y_book_encoded, num_classes=len(book_titles))  # Kodowanie kategorii w formie one-hot
+
+# Podział danych na zbiór treningowy i testowy
+X_train, X_test, y_train_book, y_test_book = train_test_split(
+    X_scaled, y_book, test_size=0.2, random_state=42
+)
+
+# Budowa modelu sieci neuronowej
+model = Sequential([
+    Dense(512, activation='relu', input_shape=(X_train.shape[1],)),  # Warstwa ukryta z 512 neuronami
+    Dropout(0.4),  # Regularizacja Dropout
+    Dense(256, activation='relu'),  # Druga warstwa ukryta
+    Dropout(0.3),
+    Dense(128, activation='relu'),
+    Dropout(0.2),
+    Dense(len(book_titles), activation='softmax')  # Warstwa wyjściowa z liczbą neuronów równą liczbie tytułów
+])
+
+# Kompilacja modelu z optymalizatorem Adam i funkcją kosztu categorical_crossentropy
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Trening modelu z użyciem mechanizmu wczesnego zatrzymywania
+early_stopping = EarlyStopping(monitor='val_loss', patience=5)  # Zatrzymanie jeśli brak poprawy przez 5 epok
+print("Rozpoczynanie treningu modelu...")
+model.fit(
+    X_train, y_train_book,
+    epochs=2, batch_size=32,  # Liczba epok i rozmiar partii
+    validation_data=(X_test, y_test_book),
+    callbacks=[early_stopping]
+)
+
+# Funkcja rekomendacji książek na podstawie danych wejściowych
+def recommend_books(input_data, top_n=5):
+    input_data_scaled = scaler.transform(input_data)  # Skalowanie danych wejściowych
+    predictions = model.predict(input_data_scaled)  # Predykcja wyników
+    recommended_ids = np.argsort(predictions[0])[-top_n:][::-1]  # Pobranie top_n rekomendacji
+    return [id_to_book[i] for i in recommended_ids]  # Zwrot tytułów książek
+
+# Funkcja rekomendacji książek na podstawie autora
+def recommend_books_by_author(search_author, top_n=5):
+    if search_author:
+        author_books = data[data['Author'] == search_author]  # Filtrowanie książek danego autora
+        author_book_titles = author_books['Book'].tolist()  # Pobranie listy tytułów
+        return author_book_titles[:top_n]  # Zwrot pierwszych top_n tytułów
+    else:
+        return []
+
+# Pobieranie preferencji użytkownika
+print("\nRekomendacje książek - Wprowadź swoje preferencje:")
+search_author = input("Podaj autora (lub zostaw puste, aby pominąć): ")
+search_genre = input("Podaj gatunek (lub zostaw puste, aby pominąć): ")
+
+# Przetwarzanie danych wejściowych użytkownika
+description_input = vectorizer.transform([search_genre]).toarray() if search_genre else np.zeros((1, 1000))
+author_input = author_encoder.transform([[search_author]]) if search_author else np.zeros((1, author_encoded.shape[1]))
+sample_input = np.concatenate([description_input, author_input], axis=1)
+
+# Wyświetlanie rekomendacji
+try:
+    if search_author: 
+        recommended_books = recommend_books_by_author(search_author)
+        if recommended_books:
+            print("\nPolecane książki autora:", recommended_books)
+        else:
+            print("\nBrak książek od podanego autora w bazie.")
+    else: 
+        recommended_books = recommend_books(sample_input)
+        print("\nOgólne polecane książki:", recommended_books)
+except Exception as e:
+    print("\nWystąpił błąd podczas rekomendacji:", e)
+
+input()
